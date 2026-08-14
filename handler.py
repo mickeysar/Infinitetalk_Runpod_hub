@@ -216,6 +216,66 @@ def get_videos(ws, prompt, input_type="image", person_count="single"):
     return output_videos
 
 
+def select_output_video(videos):
+    """Select the final muxed video instead of a short intermediate preview.
+
+    InfiniteTalk workflows can expose more than one MP4 in ComfyUI history.
+    The final result normally ends in ``-audio.mp4`` while intermediate
+    chunks/previews do not.  Prefer the muxed result and use file size as a
+    stable fallback across workflow variants where node IDs may differ.
+    """
+    candidates = []
+
+    for node_id, video_paths in videos.items():
+        for video_path in video_paths:
+            if not video_path or not os.path.isfile(video_path):
+                logger.warning(
+                    f"출력 후보 파일이 존재하지 않습니다: node={node_id}, path={video_path}"
+                )
+                continue
+
+            filename = os.path.basename(video_path).lower()
+            if not filename.endswith(".mp4"):
+                logger.info(
+                    f"MP4가 아닌 출력 후보를 건너뜁니다: node={node_id}, path={video_path}"
+                )
+                continue
+
+            file_size = os.path.getsize(video_path)
+            is_muxed_audio = filename.endswith("-audio.mp4")
+            candidates.append(
+                {
+                    "node_id": str(node_id),
+                    "path": video_path,
+                    "size": file_size,
+                    "is_muxed_audio": is_muxed_audio,
+                }
+            )
+            logger.info(
+                "출력 후보: node=%s, path=%s, size=%s, muxed_audio=%s",
+                node_id,
+                video_path,
+                file_size,
+                is_muxed_audio,
+            )
+
+    if not candidates:
+        return None
+
+    muxed_candidates = [item for item in candidates if item["is_muxed_audio"]]
+    selection_pool = muxed_candidates or candidates
+    selected = max(selection_pool, key=lambda item: item["size"])
+
+    logger.info(
+        "최종 출력 비디오 선택: node=%s, path=%s, size=%s, muxed_audio=%s",
+        selected["node_id"],
+        selected["path"],
+        selected["size"],
+        selected["is_muxed_audio"],
+    )
+    return selected["path"]
+
+
 def load_workflow(workflow_path):
     with open(workflow_path, "r") as file:
         return json.load(file)
@@ -524,17 +584,9 @@ def handler(job):
     ws.close()
     logger.info("웹소켓 연결 종료")
 
-    # 비디오가 없는 경우 처리
-    output_video_path = None
-    logger.info("출력 비디오 검색 중...")
-
-    for node_id in videos:
-        if videos[node_id]:
-            output_video_path = videos[node_id][0]
-            logger.info(f"노드 {node_id}에서 출력 비디오 발견: {output_video_path}")
-            break
-        else:
-            logger.info(f"노드 {node_id}는 비어있음")
+    # 여러 출력 중 짧은 중간 클립이 아니라 최종 muxed 비디오를 선택
+    logger.info("최종 출력 비디오 검색 중...")
+    output_video_path = select_output_video(videos)
 
     if not output_video_path:
         logger.error("출력 비디오를 찾을 수 없습니다. 모든 노드가 비어있습니다.")
