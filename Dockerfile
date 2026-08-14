@@ -1,5 +1,64 @@
-FROM registry.runpod.net/mickeysar-infinitetalk-runpod-hub-main-dockerfile:d5dc50762 AS runtime
+FROM wlsdml1114/engui_genai-base_blackwell:1.1 AS runtime
 
-# Reuse the last successful InfiniteTalk image and replace only the handler.
-# This avoids rebuilding ComfyUI, custom nodes, and the large model layers.
-COPY handler.py /handler.py
+RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*
+
+RUN pip install -U "huggingface_hub[hf_transfer]"
+RUN pip install runpod websocket-client librosa
+
+WORKDIR /
+
+RUN git clone https://github.com/comfyanonymous/ComfyUI.git && \
+    cd /ComfyUI && \
+    pip install -r requirements.txt
+
+RUN cd /ComfyUI/custom_nodes && \
+    git clone https://github.com/Comfy-Org/ComfyUI-Manager.git && \
+    cd ComfyUI-Manager && \
+    pip install -r requirements.txt
+
+RUN cd /ComfyUI/custom_nodes && \
+    git clone https://github.com/city96/ComfyUI-GGUF && \
+    cd ComfyUI-GGUF && \
+    pip install -r requirements.txt
+
+RUN cd /ComfyUI/custom_nodes && \
+    git clone https://github.com/kijai/ComfyUI-KJNodes && \
+    cd ComfyUI-KJNodes && \
+    pip install -r requirements.txt
+
+RUN cd /ComfyUI/custom_nodes && \
+    git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite && \
+    cd ComfyUI-VideoHelperSuite && \
+    pip install -r requirements.txt
+
+RUN cd /ComfyUI/custom_nodes && \
+    git clone https://github.com/orssorbit/ComfyUI-wanBlockswap
+
+RUN cd /ComfyUI/custom_nodes && \
+    git clone https://github.com/kijai/ComfyUI-MelBandRoFormer && \
+    cd ComfyUI-MelBandRoFormer && \
+    pip install -r requirements.txt
+
+RUN cd /ComfyUI/custom_nodes && \
+    git clone https://github.com/kijai/ComfyUI-WanVideoWrapper && \
+    cd ComfyUI-WanVideoWrapper && \
+    pip install -r requirements.txt
+
+# Download independent model files concurrently. The original Dockerfile
+# downloaded them one by one and exceeded RunPod's 30-minute build limit.
+RUN set -eu; \
+    wget -q https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/resolve/main/InfiniteTalk/Wan2_1-InfiniteTalk-Single_fp8_e4m3fn_scaled_KJ.safetensors -O /ComfyUI/models/diffusion_models/Wan2_1-InfiniteTalk-Single_fp8_e4m3fn_scaled_KJ.safetensors & p1=$!; \
+    wget -q https://huggingface.co/Kijai/WanVideo_comfy_fp8_scaled/resolve/main/InfiniteTalk/Wan2_1-InfiniteTalk-Multi_fp8_e4m3fn_scaled_KJ.safetensors -O /ComfyUI/models/diffusion_models/Wan2_1-InfiniteTalk-Multi_fp8_e4m3fn_scaled_KJ.safetensors & p2=$!; \
+    wget -q https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Wan2_1-I2V-14B-480P_fp8_e4m3fn.safetensors -O /ComfyUI/models/diffusion_models/Wan2_1-I2V-14B-480P_fp8_e4m3fn.safetensors & p3=$!; \
+    wget -q https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Lightx2v/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors -O /ComfyUI/models/loras/lightx2v_I2V_14B_480p_cfg_step_distill_rank64_bf16.safetensors & p4=$!; \
+    wget -q https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/Wan2_1_VAE_bf16.safetensors -O /ComfyUI/models/vae/Wan2_1_VAE_bf16.safetensors & p5=$!; \
+    wget -q https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/umt5-xxl-enc-fp8_e4m3fn.safetensors -O /ComfyUI/models/text_encoders/umt5-xxl-enc-fp8_e4m3fn.safetensors & p6=$!; \
+    wget -q https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/clip_vision/clip_vision_h.safetensors -O /ComfyUI/models/clip_vision/clip_vision_h.safetensors & p7=$!; \
+    wget -q https://huggingface.co/Kijai/MelBandRoFormer_comfy/resolve/main/MelBandRoformer_fp16.safetensors -O /ComfyUI/models/diffusion_models/MelBandRoformer_fp16.safetensors & p8=$!; \
+    wait "$p1"; wait "$p2"; wait "$p3"; wait "$p4"; \
+    wait "$p5"; wait "$p6"; wait "$p7"; wait "$p8"
+
+COPY . .
+RUN chmod +x /entrypoint.sh
+
+CMD ["/entrypoint.sh"]
