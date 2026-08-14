@@ -28,6 +28,7 @@ def truncate_base64_for_log(base64_str, max_length=50):
 
 server_address = os.getenv("SERVER_ADDRESS", "127.0.0.1")
 client_id = str(uuid.uuid4())
+comfyui_input_dir = os.getenv("COMFYUI_INPUT_DIR", "/ComfyUI/input")
 
 
 def download_file_from_url(url, output_path):
@@ -98,6 +99,33 @@ def process_input(input_data, temp_dir, output_filename, input_type):
         raise Exception(f"지원하지 않는 입력 타입: {input_type}")
 
 
+def stage_input_for_comfyui(source_path, task_id, stem, default_extension):
+    """Copy an input into ComfyUI's input directory and return its relative name.
+
+    Recent ComfyUI versions reject absolute paths outside the configured input
+    directory during prompt validation. RunPod network-volume paths therefore
+    need to be staged under /ComfyUI/input before LoadImage, LoadAudio, or
+    VHS_LoadVideo can consume them.
+    """
+    extension = os.path.splitext(source_path)[1] or default_extension
+    relative_dir = task_id
+    relative_path = f"{relative_dir}/{stem}{extension}"
+    destination_dir = os.path.join(comfyui_input_dir, relative_dir)
+    destination_path = os.path.join(comfyui_input_dir, relative_path)
+
+    os.makedirs(destination_dir, exist_ok=True)
+    if os.path.abspath(source_path) != os.path.abspath(destination_path):
+        shutil.copy2(source_path, destination_path)
+
+    logger.info(
+        "ComfyUI 입력 준비 완료: source=%s, destination=%s, workflow_path=%s",
+        source_path,
+        destination_path,
+        relative_path,
+    )
+    return relative_path
+
+
 def queue_prompt(prompt, input_type="image", person_count="single"):
     url = f"http://{server_address}:8188/prompt"
     logger.info(f"Queueing prompt to: {url}")
@@ -139,9 +167,12 @@ def queue_prompt(prompt, input_type="image", person_count="single"):
         logger.info(f"프롬프트 전송 성공: {result}")
         return result
     except urllib.error.HTTPError as e:
+        response_body = e.read().decode("utf-8", errors="replace")
         logger.error(f"HTTP 에러 발생: {e.code} - {e.reason}")
-        logger.error(f"응답 내용: {e.read().decode('utf-8')}")
-        raise
+        logger.error(f"응답 내용: {response_body}")
+        raise RuntimeError(
+            f"ComfyUI가 워크플로우를 거부했습니다 (HTTP {e.code}): {response_body}"
+        ) from e
     except Exception as e:
         logger.error(f"프롬프트 전송 중 오류: {e}")
         raise
@@ -513,16 +544,31 @@ def handler(job):
     if person_count == "multi" and wav_path_2:
         logger.info(f"두 번째 오디오 파일 크기: {os.path.getsize(wav_path_2)} bytes")
 
+    # ComfyUI 0.33+ validates that loader inputs live inside /ComfyUI/input.
+    # Keep the original network-volume files untouched and stage job-local copies.
+    media_default_extension = ".jpg" if input_type == "image" else ".mp4"
+    comfy_media_path = stage_input_for_comfyui(
+        media_path, task_id, "input_media", media_default_extension
+    )
+    comfy_wav_path = stage_input_for_comfyui(
+        wav_path, task_id, "input_audio", ".wav"
+    )
+    comfy_wav_path_2 = None
+    if person_count == "multi" and wav_path_2:
+        comfy_wav_path_2 = stage_input_for_comfyui(
+            wav_path_2, task_id, "input_audio_2", ".wav"
+        )
+
     # 워크플로우 노드 설정
     if input_type == "image":
         # I2V 워크플로우: 이미지 입력 설정
-        prompt["284"]["inputs"]["image"] = media_path
+        prompt["284"]["inputs"]["image"] = comfy_media_path
     else:
         # V2V 워크플로우: 비디오 입력 설정
-        prompt["228"]["inputs"]["video"] = media_path
+        prompt["228"]["inputs"]["video"] = comfy_media_path
 
     # 공통 설정
-    prompt["125"]["inputs"]["audio"] = wav_path
+    prompt["125"]["inputs"]["audio"] = comfy_wav_path
     prompt["241"]["inputs"]["positive_prompt"] = prompt_text
     prompt["245"]["inputs"]["value"] = width
     prompt["246"]["inputs"]["value"] = height
@@ -534,10 +580,10 @@ def handler(job):
         # 워크플로우 타입에 따라 두 번째 오디오 노드 설정
         if input_type == "image":  # I2V_multi.json의 경우
             if "307" in prompt:
-                prompt["307"]["inputs"]["audio"] = wav_path_2
+                prompt["307"]["inputs"]["audio"] = comfy_wav_path_2
         else:  # V2V_multi.json의 경우
             if "313" in prompt:
-                prompt["313"]["inputs"]["audio"] = wav_path_2
+                prompt["313"]["inputs"]["audio"] = comfy_wav_path_2
 
     ws_url = f"ws://{server_address}:8188/ws?clientId={client_id}"
     logger.info(f"Connecting to WebSocket: {ws_url}")
